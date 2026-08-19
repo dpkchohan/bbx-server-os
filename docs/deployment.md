@@ -85,18 +85,69 @@ not full readiness); it will stabilize once dependencies are healthy.
 
 
 1. Open `http://100.31.146.20:8030` in a browser.
-2. Sign up with the magic-link flow — since no email transport is
-   configured by default, retrieve the link from the logs:
+2. Sign up with the magic-link flow. If email isn't configured yet (see
+   below), retrieve the link from the logs instead:
    ```bash
-   docker compose logs webapp | grep -i "magic link"
+   docker compose logs webapp | grep "Click here to log in"
    ```
-   (For production, configure Resend/SMTP/AWS SES — see the
-   "Authentication" section of the
-   [official self-hosting docs](https://trigger.dev/docs/self-hosting/docker#authentication).)
-3. Because `TRIGGER_BOOTSTRAP_ENABLED=1`, a worker group named `bootstrap`
+   > **Known issue — magic link uses `https://` even on an http-only host.**
+   > The webapp logs (and, if email is configured, sends) the magic link
+   > with an `https://` scheme regardless of `APP_ORIGIN`/`LOGIN_ORIGIN`
+   > being `http://` — there's no reverse proxy here setting
+   > `X-Forwarded-Proto`, so the app falls back to its own default scheme.
+   > The link's path and `token` query param are correct; **just change
+   > `https://` to `http://`** before opening it, e.g.:
+   > `http://100.31.146.20:8030/magic?token=...`. Magic-link tokens expire
+   > quickly (minutes), so always grab the most recent one from the logs.
+3. **Configure a real email transport** so magic links actually arrive
+   (without this, `EMAIL_TRANSPORT` is unset and links are console-log-only
+   forever). Set in `.env`, then recreate the webapp container — a plain
+   `restart` does **not** pick up new env vars, you need `up -d`:
+   ```bash
+   # .env
+   EMAIL_TRANSPORT=aws-ses
+   FROM_EMAIL=noreply@yourdomain.com
+   REPLY_TO_EMAIL=you@yourdomain.com
+   # AWS_REGION / AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY are reused from
+   # the "AWS integration" section above - no separate SES-specific vars.
+
+   docker compose up -d webapp
+   ```
+   **AWS SES setup required before emails will actually send:**
+   - Verify `FROM_EMAIL` (or its whole domain) as a **verified identity** in
+     the [SES console](https://console.aws.amazon.com/ses/) → *Verified
+     identities*.
+   - If the AWS account is still in the **SES sandbox** (the default for
+     new accounts/regions), SES will only deliver to *also-verified*
+     recipient addresses — verify `REPLY_TO_EMAIL` and any login email
+     addresses too, or [request production access](https://docs.aws.amazon.com/ses/latest/dg/request-production-access.html)
+     to send to arbitrary recipients.
+   - The IAM identity in `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` (or the
+     EC2 instance role) needs `ses:SendEmail` and `ses:SendRawEmail`
+     permissions — see `docs/aws-setup.md` for the IAM policy pattern.
+   - Verify it worked: `docker compose logs webapp | grep -i ses` after
+     attempting a login; SES rejections show up here (e.g.
+     `MessageRejected: Email address is not verified`).
+4. **Alternative: GitHub OAuth**, if you'd rather skip email entirely.
+   Create an OAuth app at <https://github.com/settings/developers>:
+   - Homepage URL: `http://100.31.146.20:8030`
+   - Authorization callback URL: `http://100.31.146.20:8030/auth/github/callback`
+
+   Then set in `.env` and recreate the webapp container:
+   ```bash
+   AUTH_GITHUB_CLIENT_ID=<from GitHub>
+   AUTH_GITHUB_CLIENT_SECRET=<from GitHub>
+
+   docker compose up -d webapp
+   ```
+   A "Continue with GitHub" button appears on the login page once both
+   values are set. `WHITELISTED_EMAILS` (a regex, if you set one) applies
+   to GitHub sign-ins too, not just magic links.
+5. Because `TRIGGER_BOOTSTRAP_ENABLED=1`, a worker group named `bootstrap`
    and its token are created automatically and shared with the `supervisor`
    container via the `shared` volume — no manual worker-token setup needed
    for this combined single-host deployment.
+
 
 ## 5. Configure and deploy the example jobs
 

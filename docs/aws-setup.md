@@ -95,6 +95,12 @@ use the default `bbx-chat-gsfc-media`.
       "Resource": "*"
     },
     {
+      "Sid": "SESSendMagicLinkEmails",
+      "Effect": "Allow",
+      "Action": ["ses:SendEmail", "ses:SendRawEmail"],
+      "Resource": "*"
+    },
+    {
       "Sid": "S3MediaBucketAccess",
       "Effect": "Allow",
       "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],

@@ -91,6 +91,21 @@ services:
       # token-by-token AI agent streaming to the frontend.
       REALTIME_STREAMS_DEFAULT_VERSION: ${REALTIME_STREAMS_DEFAULT_VERSION:-v1}
       TRIGGER_TELEMETRY_DISABLED: 1
+      # Email (magic-link login). Set EMAIL_TRANSPORT=aws-ses (or resend/smtp)
+      # in .env — without it, magic links are only logged to `docker compose
+      # logs webapp`, never emailed. AWS SES needs FROM_EMAIL verified (or its
+      # domain verified) in the SES console; while the account is in the SES
+      # sandbox, REPLY_TO_EMAIL / recipient addresses must also be verified.
+      EMAIL_TRANSPORT: ${EMAIL_TRANSPORT:-}
+      FROM_EMAIL: ${FROM_EMAIL:-}
+      REPLY_TO_EMAIL: ${REPLY_TO_EMAIL:-}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      # GitHub OAuth login (alternative to magic-link email). Leave unset to
+      # disable — only takes effect once both ID and secret are non-empty.
+      AUTH_GITHUB_CLIENT_ID: ${AUTH_GITHUB_CLIENT_ID:-}
+      AUTH_GITHUB_CLIENT_SECRET: ${AUTH_GITHUB_CLIENT_SECRET:-}
 
   # ── Postgres: webapp metadata (users, orgs, runs, tasks, deployments) ───
   postgres:
