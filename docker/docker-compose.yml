@@ -1,0 +1,352 @@
+# bbx-server-os — Trigger.dev v4 self-hosted stack
+# Combined webapp + worker deployment for a single 8GB RAM / 2 vCPU EC2 host
+# (t2.large). Adapted from the official Trigger.dev self-hosting compose files:
+# https://github.com/triggerdotdev/trigger.dev/tree/main/hosting/docker
+#
+# Resource limits below use the Compose Specification's flat `mem_limit` /
+# `mem_reservation` / `cpus` fields, which Docker Compose v2 (2.20+) enforces
+# directly with `docker compose up` — no Swarm mode or `--compatibility` flag
+# required. See docs/architecture.md for the full 8GB memory budget breakdown.
+#
+# Run from the repo root:
+#   cd docker && docker compose up -d
+name: bbx-server-os
+
+x-logging: &logging-config
+  driver: ${LOGGING_DRIVER:-local}
+  options:
+    max-size: ${LOGGING_MAX_SIZE:-20m}
+    max-file: ${LOGGING_MAX_FILES:-5}
+    compress: ${LOGGING_COMPRESS:-true}
+
+services:
+  # ── Webapp: dashboard, API, realtime ────────────────────────────────────
+  webapp:
+    image: ghcr.io/triggerdotdev/trigger.dev:${TRIGGER_IMAGE_TAG:-latest}
+    restart: ${RESTART_POLICY:-unless-stopped}
+    logging: *logging-config
+    mem_limit: ${WEBAPP_MEM_LIMIT:-1536m}
+    mem_reservation: ${WEBAPP_MEM_RESERVATION:-1024m}
+    cpus: ${WEBAPP_CPUS:-0.75}
+    ports:
+      - ${WEBAPP_PUBLISH_IP:-0.0.0.0}:8030:3000
+    depends_on:
+      - postgres
+      - redis
+      - clickhouse
+    networks:
+      - webapp
+      - supervisor
+    volumes:
+      - shared:/home/node/shared
+    # Only needed for bootstrap (first boot fixes ownership of the shared volume)
+    user: root
+    command: sh -c "chown -R node:node /home/node/shared && exec ./scripts/entrypoint.sh"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "http.get('http://localhost:3000/healthcheck', res => process.exit(res.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 10s
+    environment:
+      APP_ORIGIN: ${APP_ORIGIN:-http://100.31.146.20:8030}
+      LOGIN_ORIGIN: ${LOGIN_ORIGIN:-http://100.31.146.20:8030}
+      API_ORIGIN: ${API_ORIGIN:-http://100.31.146.20:8030}
+      SESSION_SECRET: ${SESSION_SECRET}
+      MAGIC_LINK_SECRET: ${MAGIC_LINK_SECRET}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      PROVIDER_SECRET: ${PROVIDER_SECRET}
+      COORDINATOR_SECRET: ${COORDINATOR_SECRET}
+      MANAGED_WORKER_SECRET: ${MANAGED_WORKER_SECRET}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_TLS_DISABLED: true
+      APP_LOG_LEVEL: ${APP_LOG_LEVEL:-info}
+      DATABASE_URL: ${DATABASE_URL:-postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-main}?schema=public&sslmode=disable}
+      DIRECT_URL: ${DIRECT_URL:-postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-main}?schema=public&sslmode=disable}
+      DEPLOY_REGISTRY_HOST: ${DOCKER_REGISTRY_URL:-localhost:5000}
+      DEPLOY_REGISTRY_NAMESPACE: ${DOCKER_REGISTRY_NAMESPACE:-trigger}
+      OBJECT_STORE_BASE_URL: ${OBJECT_STORE_BASE_URL:-http://minio:9000}
+      OBJECT_STORE_ACCESS_KEY_ID: ${OBJECT_STORE_ACCESS_KEY_ID}
+      OBJECT_STORE_SECRET_ACCESS_KEY: ${OBJECT_STORE_SECRET_ACCESS_KEY}
+      GRACEFUL_SHUTDOWN_TIMEOUT: 1000
+      # 1200MB heap inside a 1536MB container limit (~20% headroom, per Trigger.dev guidance)
+      NODE_MAX_OLD_SPACE_SIZE: ${NODE_MAX_OLD_SPACE_SIZE:-1200}
+      # Bootstrap automatically creates a worker group + token for the combined single-host setup
+      TRIGGER_BOOTSTRAP_ENABLED: 1
+      TRIGGER_BOOTSTRAP_WORKER_GROUP_NAME: bootstrap
+      TRIGGER_BOOTSTRAP_WORKER_TOKEN_PATH: /home/node/shared/worker_token
+      CLICKHOUSE_URL: ${CLICKHOUSE_URL:-http://${CLICKHOUSE_USER:-default}:${CLICKHOUSE_PASSWORD}@clickhouse:8123?secure=false}
+      CLICKHOUSE_LOG_LEVEL: ${CLICKHOUSE_LOG_LEVEL:-info}
+      RUN_REPLICATION_ENABLED: 1
+      RUN_REPLICATION_CLICKHOUSE_URL: ${RUN_REPLICATION_CLICKHOUSE_URL:-http://${CLICKHOUSE_USER:-default}:${CLICKHOUSE_PASSWORD}@clickhouse:8123}
+      # v1 (Redis-backed) realtime streams instead of the s2-lite service — saves ~300-500MB RAM,
+      # not needed for our batch transcription/AI job workloads. Switch to v2 if you later add
+      # token-by-token AI agent streaming to the frontend.
+      REALTIME_STREAMS_DEFAULT_VERSION: ${REALTIME_STREAMS_DEFAULT_VERSION:-v1}
+      TRIGGER_TELEMETRY_DISABLED: 1
+
+  # ── Postgres: webapp metadata (users, orgs, runs, tasks, deployments) ───
+  postgres:
+    image: postgres:${POSTGRES_IMAGE_TAG:-14}
+    restart: ${RESTART_POLICY:-unless-stopped}
+    logging: *logging-config
+    mem_limit: ${POSTGRES_MEM_LIMIT:-768m}
+    mem_reservation: ${POSTGRES_MEM_RESERVATION:-512m}
+    cpus: ${POSTGRES_CPUS:-0.5}
+    ports:
+      - ${POSTGRES_PUBLISH_IP:-127.0.0.1}:5432:5432
+    networks:
+      - webapp
+    volumes:
+      - postgres:/var/lib/postgresql/data
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env - run ./generate-secrets.sh}
+      POSTGRES_DB: ${POSTGRES_DB:-main}
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+    command:
+      - postgres
+      - -c
+      - shared_buffers=192MB
+      - -c
+      - max_connections=100
+      - -c
+      - effective_cache_size=384MB
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-main}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ── Redis: queues, rate limits, v1 realtime streams ─────────────────────
+  redis:
+    image: redis:${REDIS_IMAGE_TAG:-7}
+    restart: ${RESTART_POLICY:-unless-stopped}
+    logging: *logging-config
+    mem_limit: ${REDIS_MEM_LIMIT:-320m}
+    mem_reservation: ${REDIS_MEM_RESERVATION:-192m}
+    cpus: ${REDIS_CPUS:-0.25}
+    ports:
+      - ${REDIS_PUBLISH_IP:-127.0.0.1}:6379:6379
+    networks:
+      - webapp
+    volumes:
+      - redis:/data
+    command: redis-server --maxmemory 256mb --maxmemory-policy noeviction --save 60 1
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  # ── ClickHouse: run/task event timeseries + logs ────────────────────────
+  clickhouse:
+    image: clickhouse/clickhouse-server:${CLICKHOUSE_IMAGE_TAG:-24.8}
+    restart: ${RESTART_POLICY:-unless-stopped}
+    logging: *logging-config
+    mem_limit: ${CLICKHOUSE_MEM_LIMIT:-1536m}
+    mem_reservation: ${CLICKHOUSE_MEM_RESERVATION:-768m}
+    cpus: ${CLICKHOUSE_CPUS:-0.75}
+    ports:
+      - ${CLICKHOUSE_PUBLISH_IP:-127.0.0.1}:8123:8123
+      - ${CLICKHOUSE_PUBLISH_IP:-127.0.0.1}:9010:9000
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    networks:
+      - webapp
+    volumes:
+      - clickhouse:/var/lib/clickhouse
+      - ./clickhouse/override.xml:/etc/clickhouse-server/config.d/override.xml:ro
+    environment:
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-default}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?Set CLICKHOUSE_PASSWORD in .env - run ./generate-secrets.sh}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "clickhouse-client",
+          "--host",
+          "localhost",
+          "--port",
+          "9000",
+          "--user",
+          "${CLICKHOUSE_USER:-default}",
+          "--password",
+          "${CLICKHOUSE_PASSWORD}",
+          "--query",
+          "SELECT 1",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ── Container registry: hosts built task images for the worker to pull ──
+  registry:
+    image: registry:${REGISTRY_IMAGE_TAG:-2}
+    restart: ${RESTART_POLICY:-unless-stopped}
+    logging: *logging-config
+    mem_limit: ${REGISTRY_MEM_LIMIT:-192m}
+    mem_reservation: ${REGISTRY_MEM_RESERVATION:-96m}
+    cpus: ${REGISTRY_CPUS:-0.25}
+    ports:
+      - ${REGISTRY_PUBLISH_IP:-127.0.0.1}:5000:5000
+    networks:
+      - webapp
+    volumes:
+      - registry:/var/lib/registry
+      - ./registry/auth.htpasswd:/auth/htpasswd:ro
+    environment:
+      REGISTRY_AUTH: htpasswd
+      REGISTRY_AUTH_HTPASSWD_REALM: Registry Realm
+      REGISTRY_AUTH_HTPASSWD_PATH: /auth/htpasswd
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:5000/"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ── MinIO: local S3-compatible object storage for task I/O packets ──────
+  # Production task inputs/outputs needing long-term retention should go to
+  # the real AWS S3 bucket configured in .env, not this bundled store —
+  # see docs/aws-setup.md
+  minio:
+    image: minio/minio:${MINIO_IMAGE_TAG:-latest}
+    restart: ${RESTART_POLICY:-unless-stopped}
+    logging: *logging-config
+    mem_limit: ${MINIO_MEM_LIMIT:-320m}
+    mem_reservation: ${MINIO_MEM_RESERVATION:-192m}
+    cpus: ${MINIO_CPUS:-0.25}
+    ports:
+      - ${MINIO_PUBLISH_IP:-127.0.0.1}:9000:9000
+      - ${MINIO_PUBLISH_IP:-127.0.0.1}:9001:9001
+    networks:
+      - webapp
+    volumes:
+      - minio:/data
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-${OBJECT_STORE_ACCESS_KEY_ID:-admin}}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-${OBJECT_STORE_SECRET_ACCESS_KEY:?Set OBJECT_STORE_SECRET_ACCESS_KEY in .env - run ./generate-secrets.sh}}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 10s
+      retries: 5
+      start_period: 10s
+
+
+  # ── Docker Socket Proxy: scoped, read-mostly access to the host Docker
+  #    daemon for the supervisor (no raw /var/run/docker.sock exposure) ────
+  docker-proxy:
+    image: tecnativa/docker-socket-proxy:${DOCKER_PROXY_IMAGE_TAG:-latest}
+    restart: ${RESTART_POLICY:-unless-stopped}
+    logging: *logging-config
+    mem_limit: ${DOCKER_PROXY_MEM_LIMIT:-96m}
+    mem_reservation: ${DOCKER_PROXY_MEM_RESERVATION:-32m}
+    cpus: ${DOCKER_PROXY_CPUS:-0.1}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - docker-proxy
+    environment:
+      - LOG_LEVEL=info
+      - POST=1
+      - CONTAINERS=1
+      - IMAGES=1
+      - INFO=1
+      - NETWORKS=1
+    healthcheck:
+      test: ["CMD", "nc", "-z", "127.0.0.1", "2375"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  # ── Supervisor: pulls task images from the registry, runs them as Docker
+  #    containers, and enforces per-task machine-preset CPU/RAM limits ─────
+  supervisor:
+    image: ghcr.io/triggerdotdev/supervisor:${TRIGGER_IMAGE_TAG:-latest}
+    restart: ${RESTART_POLICY:-unless-stopped}
+    logging: *logging-config
+    mem_limit: ${SUPERVISOR_MEM_LIMIT:-512m}
+    mem_reservation: ${SUPERVISOR_MEM_RESERVATION:-256m}
+    cpus: ${SUPERVISOR_CPUS:-0.5}
+    depends_on:
+      - docker-proxy
+      - webapp
+    networks:
+      - supervisor
+      - docker-proxy
+      - webapp
+    volumes:
+      - shared:/home/node/shared
+    user: root
+    command: sh -c "chown -R node:node /home/node/shared && exec /usr/bin/dumb-init -- pnpm run --filter supervisor start"
+    environment:
+      # Uses the bootstrap token the webapp writes on first boot (combined single-host setup)
+      TRIGGER_WORKER_TOKEN: file:///home/node/shared/worker_token
+      MANAGED_WORKER_SECRET: ${MANAGED_WORKER_SECRET}
+      TRIGGER_API_URL: ${TRIGGER_API_URL:-http://webapp:3000}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://webapp:3000/otel}
+      TRIGGER_WORKLOAD_API_DOMAIN: supervisor
+      TRIGGER_WORKLOAD_API_PORT_EXTERNAL: 8020
+      DEBUG: ${SUPERVISOR_DEBUG:-0}
+      # Hard-enforce machine-preset CPU/RAM caps on every task container — critical on an 8GB box
+      ENFORCE_MACHINE_PRESETS: 1
+      TRIGGER_DEQUEUE_INTERVAL_MS: ${TRIGGER_DEQUEUE_INTERVAL_MS:-1000}
+      DOCKER_HOST: tcp://docker-proxy:2375
+      DOCKER_RUNNER_NETWORKS: webapp,supervisor
+      DOCKER_REGISTRY_URL: ${DOCKER_REGISTRY_URL:-localhost:5000}
+      DOCKER_REGISTRY_USERNAME: ${DOCKER_REGISTRY_USERNAME:-}
+      DOCKER_REGISTRY_PASSWORD: ${DOCKER_REGISTRY_PASSWORD:-}
+      DOCKER_AUTOREMOVE_EXITED_CONTAINERS: 0
+      # AWS credentials available inside every task container (Bedrock / Transcribe / Translate / S3)
+      # Prefer attaching an EC2 instance IAM role and leaving the two key vars blank — see docs/aws-setup.md
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      BBX_S3_BUCKET: ${BBX_S3_BUCKET:-}
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "http.get('http://localhost:8020/health', res => process.exit(res.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  postgres:
+  redis:
+  clickhouse:
+  registry:
+  minio:
+  shared:
+
+networks:
+  docker-proxy:
+    name: docker-proxy
+  supervisor:
+    name: supervisor
+  webapp:
+    name: webapp
+
+

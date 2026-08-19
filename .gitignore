@@ -70,6 +70,14 @@ web_modules/
 .env.*
 !.env.example
 
+# SSH / PEM private keys - never commit these
+*.pem
+*.key
+
+# Generated registry auth (contains real password hashes) - see auth.htpasswd.example
+docker/registry/auth.htpasswd
+
+
 # parcel-bundler cache (https://parceljs.org/)
 .cache
 .parcel-cache

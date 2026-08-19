@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<!--
+  ClickHouse memory tuning for a constrained 8GB host.
+  This caps ClickHouse's own internal memory usage so it stays inside the
+  1536m mem_limit set on the clickhouse service in docker-compose.yml.
+  See docs/architecture.md for the full memory budget.
+-->
+<clickhouse>
+  <max_server_memory_usage>1073741824</max_server_memory_usage> <!-- 1GB -->
+  <max_server_memory_usage_to_ram_ratio>0.5</max_server_memory_usage_to_ram_ratio>
+  <mark_cache_size>134217728</mark_cache_size> <!-- 128MB -->
+  <uncompressed_cache_size>0</uncompressed_cache_size>
+  <profiles>
+    <default>
+      <max_memory_usage>536870912</max_memory_usage> <!-- 512MB per query -->
+    </default>
+  </profiles>
+</clickhouse>
