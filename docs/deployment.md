@@ -62,7 +62,27 @@ First boot runs Postgres/ClickHouse migrations automatically — this can take
 still starting, that's expected (Compose's `depends_on` handles ordering but
 not full readiness); it will stabilize once dependencies are healthy.
 
-## 4. Create your account and worker group
+> **Known issue — ClickHouse JSON column type.** The webapp's ClickHouse
+> migrations (`task_runs_v1`, `task_events_v1`) use the `JSON` column type,
+> which requires `allow_experimental_json_type` and, on ClickHouse 24.x,
+> the `enable_json_type` table setting is entirely unsupported. This repo's
+> `docker-compose.yml` pins `CLICKHOUSE_IMAGE_TAG=26.2` (via `.env.example`)
+> and ships `docker/clickhouse/users.d/default.xml` enabling
+> `allow_experimental_json_type` to avoid this out of the box. If `webapp`
+> crash-loops with `DB::Exception: ... experimental JSON type is not
+> allowed` or `Unknown setting 'enable_json_type'` in
+> `docker compose logs webapp`, confirm `CLICKHOUSE_IMAGE_TAG=26.2` (or
+> newer) is set in `.env` and that the `users.d/default.xml` volume mount is
+> present on the `clickhouse` service, then `docker compose down && docker
+> compose up -d`.
+>
+> **Important:** mount `users.d/default.xml` as a single file, not the
+> whole `users.d` directory. ClickHouse's entrypoint writes its own
+> `default-user.xml` into that directory on every boot (to apply
+> `CLICKHOUSE_PASSWORD`) — mounting the entire directory `:ro` blocks that
+> write and crash-loops the container with `Read-only file system`.
+
+
 
 1. Open `http://100.31.146.20:8030` in a browser.
 2. Sign up with the magic-link flow — since no email transport is

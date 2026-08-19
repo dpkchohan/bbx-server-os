@@ -150,7 +150,7 @@ services:
 
   # ── ClickHouse: run/task event timeseries + logs ────────────────────────
   clickhouse:
-    image: clickhouse/clickhouse-server:${CLICKHOUSE_IMAGE_TAG:-24.8}
+    image: clickhouse/clickhouse-server:${CLICKHOUSE_IMAGE_TAG:-26.2}
     restart: ${RESTART_POLICY:-unless-stopped}
     logging: *logging-config
     mem_limit: ${CLICKHOUSE_MEM_LIMIT:-1536m}
@@ -168,6 +168,10 @@ services:
     volumes:
       - clickhouse:/var/lib/clickhouse
       - ./clickhouse/override.xml:/etc/clickhouse-server/config.d/override.xml:ro
+      # Mounted as a single file (not the whole users.d directory) because the
+      # ClickHouse entrypoint needs to write its own default-user.xml into
+      # users.d/ at startup — mounting the directory read-only breaks that.
+      - ./clickhouse/users.d/default.xml:/etc/clickhouse-server/users.d/default.xml:ro
     environment:
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-default}
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?Set CLICKHOUSE_PASSWORD in .env - run ./generate-secrets.sh}
