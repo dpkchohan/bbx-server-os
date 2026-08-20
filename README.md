@@ -4,11 +4,14 @@ Self-hosted AI orchestration server for BBX Chat GSFC — meeting bots,
 transcription, and AI workflows.
 
 Runs on a single AWS EC2 instance (`i-0ca603e4ef9deb7f9`, t2.large, 8 GB RAM,
-public IP `100.31.146.20`) using a Docker Compose deployment of
+`server.pddt.in` → `100.31.146.20`) using a Docker Compose deployment of
 **Trigger.dev v4**, adapted from the
 [official self-hosting compose files](https://github.com/triggerdotdev/trigger.dev/tree/main/hosting/docker),
 plus three example jobs that call Amazon Transcribe, Amazon Translate, and
-Amazon Bedrock.
+Amazon Bedrock. A Caddy reverse proxy in front of the stack terminates TLS
+with an auto-renewing Let's Encrypt certificate — this isn't just cosmetic,
+the webapp's session cookie requires real HTTPS for magic-link/GitHub OAuth
+login to work at all (see `docs/deployment.md` "HTTPS via Caddy").
 
 ## Quick start
 
@@ -18,7 +21,8 @@ cd bbx-server-os
 cp .env.example .env
 cd docker && ./generate-secrets.sh
 docker compose up -d
-# → open http://100.31.146.20:8030
+# → set up Caddy + your domain first (docs/deployment.md "HTTPS via Caddy"),
+#   then open https://server.pddt.in
 ```
 
 Full step-by-step instructions, prerequisites, and a deployment checklist

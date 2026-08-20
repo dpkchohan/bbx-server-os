@@ -1,0 +1,19 @@
+# Caddy reverse proxy config for bbx-server-os, terminating TLS for the
+# Trigger.dev webapp dashboard/API and proxying to the container's published
+# port (8030). Caddy auto-provisions and renews a Let's Encrypt certificate
+# for the domain below - no manual cert management needed.
+#
+# This file is NOT consumed by Docker Compose - Caddy runs directly on the
+# EC2 host (installed via apt, see docs/deployment.md "HTTPS via Caddy"),
+# not as a container, so it can bind ports 80/443 without conflicting with
+# anything in docker-compose.yml.
+#
+# Install / apply:
+#   sudo cp docker/Caddyfile /etc/caddy/Caddyfile
+#   sudo systemctl restart caddy
+#
+# Replace server.pddt.in with your own domain, and update APP_ORIGIN /
+# LOGIN_ORIGIN / API_ORIGIN in .env to match (see docs/deployment.md).
+server.pddt.in {
+    reverse_proxy localhost:8030
+}

@@ -7,9 +7,14 @@ running the example jobs against real AWS services.
 
 - [ ] EC2 instance running (`i-0ca603e4ef9deb7f9`, Ubuntu 26.04, t2.large,
       100.31.146.20) — already provisioned.
-- [ ] Security group allows inbound `22/tcp` (SSH, from your IP only) and
-      `8030/tcp` (Trigger.dev dashboard, from your team's IP range or `0.0.0.0/0`
-      if acceptable for your threat model).
+- [ ] A domain name pointed at the instance (`server.pddt.in` → A record →
+      `100.31.146.20`) — recommended over using the bare IP; see "HTTPS via
+      Caddy" below for why.
+- [ ] Security group allows inbound `22/tcp` (SSH, from your IP only),
+      `80/tcp` and `443/tcp` (HTTP/HTTPS via Caddy, from `0.0.0.0/0` — both
+      are required for Let's Encrypt's ACME challenge and normal traffic).
+      `8030/tcp` no longer needs to be open publicly once Caddy is in front
+      of it (see below) — it's only used internally, proxied by Caddy.
 - [ ] SSH key pair (`bbx-server-os-key`) available locally.
 - [ ] Docker Engine 20.10.0+ and Docker Compose 2.20.0+ installed on the
       instance (see below).
@@ -43,10 +48,77 @@ chmod +x generate-secrets.sh
 ./generate-secrets.sh     # fills in SESSION_SECRET, POSTGRES_PASSWORD, etc.
 ```
 
-Review `.env` afterwards — confirm `APP_ORIGIN`/`LOGIN_ORIGIN`/`API_ORIGIN`
-point at `http://100.31.146.20:8030` (already the default), and fill in
+Review `.env` afterwards — set `APP_ORIGIN`/`LOGIN_ORIGIN`/`API_ORIGIN` to
+your domain over `https://` (e.g. `https://server.pddt.in`, matching the
+`.env.example` default) once Caddy is set up in step 2b below, and fill in
 `AWS_REGION` / `BBX_S3_BUCKET` / `BBX_BEDROCK_MODEL_ID` for the AWS
 integration.
+
+## 2b. HTTPS via Caddy (strongly recommended)
+
+**Why this matters, not just for appearances:** the webapp always runs with
+`NODE_ENV=production`, and its session cookie is unconditionally set with
+the `Secure` attribute in that mode (`sessionStorage.server.ts`). Browsers
+silently refuse to send `Secure` cookies back over a plain `http://`
+connection. Since the session cookie carries the magic-link/OAuth `state`
+during login, **serving the dashboard over bare HTTP breaks both magic-link
+and GitHub OAuth login** — the callback silently redirects back to `/login`
+with no error logged anywhere. A domain + real TLS cert (even a free
+Let's Encrypt one via Caddy) fixes this outright.
+
+Install Caddy from its official apt repo:
+
+```bash
+sudo apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | sudo tee /etc/apt/sources.list.d/caddy-stable.list
+sudo apt-get update
+sudo apt-get install -y caddy
+```
+
+Point it at the webapp using this repo's `docker/Caddyfile` (edit the
+domain first if you're not using `server.pddt.in`):
+
+```bash
+sudo cp docker/Caddyfile /etc/caddy/Caddyfile
+sudo systemctl restart caddy
+sudo systemctl status caddy   # should show "active (running)"
+```
+
+Caddy automatically requests and renews a Let's Encrypt certificate for the
+domain in the Caddyfile on first start — no manual certbot steps needed.
+Watch it happen live:
+
+```bash
+sudo journalctl -u caddy -f
+# look for: "certificate obtained successfully"
+```
+
+Then update `.env` to match your domain and recreate the webapp container
+(a plain `restart` won't pick up new env vars — see the note in step 4):
+
+```bash
+# .env
+APP_ORIGIN=https://server.pddt.in
+LOGIN_ORIGIN=https://server.pddt.in
+API_ORIGIN=https://server.pddt.in
+
+docker compose down
+docker compose up -d
+```
+
+Verify:
+
+```bash
+curl -I https://server.pddt.in
+# Expect: HTTP/2 302, location: /login?redirectTo=%2F, via: 1.1 Caddy
+```
+
+A `302` to `/login` is success here (it's the app's own auth redirect for
+an unauthenticated request to `/`) — a `502` means Caddy is up but can't
+reach the webapp container (check `docker compose ps`); a TLS/connection
+error means Caddy itself isn't running or ports 80/443 aren't reachable
+from the internet (check the security group).
 
 ## 3. Start the stack
 
@@ -64,6 +136,7 @@ not full readiness); it will stabilize once dependencies are healthy.
 
 > **Known issue — ClickHouse JSON column type.** The webapp's ClickHouse
 > migrations (`task_runs_v1`, `task_events_v1`) use the `JSON` column type,
+
 > which requires `allow_experimental_json_type` and, on ClickHouse 24.x,
 > the `enable_json_type` table setting is entirely unsupported. This repo's
 > `docker-compose.yml` pins `CLICKHOUSE_IMAGE_TAG=26.2` (via `.env.example`)
@@ -84,21 +157,23 @@ not full readiness); it will stabilize once dependencies are healthy.
 
 
 
-1. Open `http://100.31.146.20:8030` in a browser.
+1. Open `https://server.pddt.in` in a browser (or `http://100.31.146.20:8030`
+   if you skipped the Caddy step — see the cookie warning below).
 2. Sign up with the magic-link flow. If email isn't configured yet (see
    below), retrieve the link from the logs instead:
    ```bash
    docker compose logs webapp | grep "Click here to log in"
    ```
-   > **Known issue — magic link uses `https://` even on an http-only host.**
-   > The webapp logs (and, if email is configured, sends) the magic link
-   > with an `https://` scheme regardless of `APP_ORIGIN`/`LOGIN_ORIGIN`
-   > being `http://` — there's no reverse proxy here setting
-   > `X-Forwarded-Proto`, so the app falls back to its own default scheme.
-   > The link's path and `token` query param are correct; **just change
-   > `https://` to `http://`** before opening it, e.g.:
-   > `http://100.31.146.20:8030/magic?token=...`. Magic-link tokens expire
-   > quickly (minutes), so always grab the most recent one from the logs.
+   > **Cookie/HTTPS requirement.** The webapp's session cookie (which
+   > carries the magic-link/OAuth `state`) is always set with the `Secure`
+   > attribute in production mode. Browsers silently drop `Secure` cookies
+   > over plain HTTP, which breaks the login callback with no visible
+   > error — it just redirects back to `/login`. **Complete step 2b (HTTPS
+   > via Caddy) before testing login**, and access the dashboard only via
+   > `https://server.pddt.in`, not the bare IP/port. If you also see the
+   > magic link logged with an `https://` scheme when testing without
+   > Caddy, that's the same underlying issue from the other direction —
+   > it resolves itself once you're actually serving over HTTPS.
 3. **Configure a real email transport** so magic links actually arrive
    (without this, `EMAIL_TRANSPORT` is unset and links are console-log-only
    forever). Set in `.env`, then recreate the webapp container — a plain
@@ -130,8 +205,11 @@ not full readiness); it will stabilize once dependencies are healthy.
      `MessageRejected: Email address is not verified`).
 4. **Alternative: GitHub OAuth**, if you'd rather skip email entirely.
    Create an OAuth app at <https://github.com/settings/developers>:
-   - Homepage URL: `http://100.31.146.20:8030`
-   - Authorization callback URL: `http://100.31.146.20:8030/auth/github/callback`
+   - Homepage URL: `https://server.pddt.in`
+   - Authorization callback URL: `https://server.pddt.in/auth/github/callback`
+
+   (Use your actual domain — this **requires** step 2b/HTTPS to be done
+   first, for the same `Secure` cookie reason as magic links above.)
 
    Then set in `.env` and recreate the webapp container:
    ```bash
@@ -141,12 +219,15 @@ not full readiness); it will stabilize once dependencies are healthy.
    docker compose up -d webapp
    ```
    A "Continue with GitHub" button appears on the login page once both
-   values are set. `WHITELISTED_EMAILS` (a regex, if you set one) applies
-   to GitHub sign-ins too, not just magic links.
+   values are set (verify with
+   `curl -s https://server.pddt.in/login | grep -o 'Continue with GitHub'`).
+   `WHITELISTED_EMAILS` (a regex, if you set one) applies to GitHub
+   sign-ins too, not just magic links.
 5. Because `TRIGGER_BOOTSTRAP_ENABLED=1`, a worker group named `bootstrap`
    and its token are created automatically and shared with the `supervisor`
    container via the `shared` volume — no manual worker-token setup needed
    for this combined single-host deployment.
+
 
 
 ## 5. Configure and deploy the example jobs
@@ -156,7 +237,7 @@ cd ../jobs
 npm install
 # Edit trigger.config.ts or set TRIGGER_PROJECT_REF in .env to your project ref
 
-npx trigger.dev@latest login -a http://100.31.146.20:8030 --profile self-hosted
+npx trigger.dev@latest login -a https://server.pddt.in --profile self-hosted
 npx trigger.dev@latest deploy --profile self-hosted
 ```
 
@@ -193,10 +274,16 @@ Watch the run in the dashboard's **Runs** view. On success, check
 ## Deployment checklist
 
 - [ ] Docker + Docker Compose installed and verified (`docker compose version`)
+- [ ] DNS record for your domain points at the EC2 instance's public IP
+- [ ] Caddy installed and running, `docker/Caddyfile` deployed with your
+      domain, certificate obtained (`sudo systemctl status caddy`,
+      `sudo journalctl -u caddy | grep "certificate obtained"`)
 - [ ] `.env` populated via `generate-secrets.sh`, reviewed for correct
-      `APP_ORIGIN`/`API_ORIGIN` (public IP) and AWS variables
+      `APP_ORIGIN`/`LOGIN_ORIGIN`/`API_ORIGIN` (your `https://` domain, not
+      the bare IP) and AWS variables
 - [ ] `docker compose up -d` — all 8 services report healthy
-- [ ] Dashboard reachable at `http://100.31.146.20:8030`
+- [ ] Dashboard reachable at `https://server.pddt.in` (curl returns
+      `HTTP/2 302` to `/login`, not a TLS or connection error)
 - [ ] Account created, project created, project ref copied into
       `jobs/trigger.config.ts` (or `.env`)
 - [ ] IAM role/instance profile attached with the policy from
