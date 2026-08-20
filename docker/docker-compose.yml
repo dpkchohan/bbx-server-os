@@ -319,7 +319,14 @@ services:
       # Uses the bootstrap token the webapp writes on first boot (combined single-host setup)
       TRIGGER_WORKER_TOKEN: file:///home/node/shared/worker_token
       MANAGED_WORKER_SECRET: ${MANAGED_WORKER_SECRET}
-      TRIGGER_API_URL: ${TRIGGER_API_URL:-http://webapp:3000}
+      # Always the internal Docker network address - deliberately NOT driven by
+      # a .env variable. The supervisor's control-plane traffic (worker
+      # dequeue/heartbeat) must stay on the internal network; if this read
+      # from a shared TRIGGER_API_URL var, setting that var to the public
+      # domain for SDK/CLI use (see .env's TRIGGER_CLI_API_URL) would silently
+      # reroute supervisor traffic out through the reverse proxy/internet on
+      # its next recreation. See .env.example for the external SDK/CLI URL.
+      TRIGGER_API_URL: http://webapp:3000
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://webapp:3000/otel}
       TRIGGER_WORKLOAD_API_DOMAIN: supervisor
       TRIGGER_WORKLOAD_API_PORT_EXTERNAL: 8020
